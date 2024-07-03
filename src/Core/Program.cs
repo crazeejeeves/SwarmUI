@@ -129,58 +129,14 @@ public class Program
         }
         Logs.StartLogSaving();
         timer.Check("Initial settings load");
+
         if (ServerSettings.CheckForUpdates)
         {
-            waitFor.Add(Utilities.RunCheckedTask(async () =>
-            {
-                await Utilities.RunGitProcess("fetch");
-                string refs = await Utilities.RunGitProcess("tag --sort=-creatordate");
-                string[] tags = [.. refs.Split('\n').Where(t => !string.IsNullOrWhiteSpace(t) && t.Contains('-') && Version.TryParse(t.Before('-'), out _)).Select(t => t.Trim()).OrderByDescending(t => Version.Parse(t.Before('-')))];
-                Version local = Version.Parse(Utilities.Version);
-                string[] newer = [.. tags.Where(t => Version.Parse(t.Before('-')) > local)];
-                if (newer.Any())
-                {
-                    string url = $"{Utilities.RepoRoot}/releases/tag/{newer[0]}";
-                    Logs.Warning($"A new version of SwarmUI is available: {newer[0]}! You are running version {Utilities.Version}, this is {newer.Length} release(s) behind. See release notes at {url}");
-                    VersionUpdateMessage = $"Update available: {newer[0]} (you are running {Utilities.Version}, this is {newer.Length} release(s) behind):\nSee release notes at <a target=\"_blank\" href=\"{url}\">{url}</a>"
-                        + "\nThere is a button available to automatically apply the update on the <a href=\"#Settings-Server\" onclick=\"getRequiredElementById('servertabbutton').click();getRequiredElementById('serverinfotabbutton').click();\">Server Info Tab</a>.";
-                }
-                else
-                {
-                    Logs.Init($"Swarm is up to date! You have version {Utilities.Version}, and {tags[0]} is the latest.");
-                }
-            }));
+            waitFor.Add(Utilities.RunCheckedTask(CheckForUpdates));
         }
-        waitFor.Add(Utilities.RunCheckedTask(async () =>
-        {
-            try
-            {
-                string commitDate = await Utilities.RunGitProcess("show --no-patch --format=%ci HEAD");
-                DateTimeOffset date = DateTimeOffset.Parse(commitDate.Trim()).ToUniversalTime();
-                CurrentGitDate = $"{date:yyyy-MM-dd HH:mm:ss}";
-                Logs.Init($"Current git commit marked as date {CurrentGitDate}");
-            }
-            catch (Exception ex)
-            {
-                Logs.Error($"Failed to get git commit date: {ex}");
-                CurrentGitDate = "Git failed to load";
-            }
-        }));
-        waitFor.Add(Utilities.RunCheckedTask(async () =>
-        {
-            NvidiaUtil.NvidiaInfo[] gpuInfo = NvidiaUtil.QueryNvidia();
-            SystemStatusMonitor.HardwareInfo.RefreshMemoryStatus();
-            MemoryStatus memStatus = SystemStatusMonitor.HardwareInfo.MemoryStatus;
-            Logs.Init($"CPU Cores: {Environment.ProcessorCount} | RAM: {new MemoryNum((long)memStatus.TotalPhysical)} total, {new MemoryNum((long)memStatus.AvailablePhysical)} available");
-            if (gpuInfo is not null)
-            {
-                JObject gpus = [];
-                foreach (NvidiaUtil.NvidiaInfo gpu in gpuInfo)
-                {
-                    Logs.Init($"GPU {gpu.ID}: {gpu.GPUName} | Temp {gpu.Temperature}C | Util {gpu.UtilizationGPU}% GPU, {gpu.UtilizationMemory}% Memory | VRAM {gpu.TotalMemory} total, {gpu.FreeMemory} free, {gpu.UsedMemory} used");
-                }
-            }
-        }));
+        waitFor.Add(Utilities.RunCheckedTask(CheckGitCommit));
+        waitFor.Add(Utilities.RunCheckedTask(CheckSystemInfo));
+
         T2IModelClassSorter.Init();
         RunOnAllExtensions(e => e.OnPreInit());
         timer.Check("Extension PreInit");
@@ -278,6 +234,61 @@ public class Program
         WebServer.WebApp.WaitForShutdown();
         Shutdown();
     }
+
+    #region Utility tasks
+
+    private static async Task CheckForUpdates()
+    {
+        await Utilities.RunGitProcess("fetch");
+        string refs = await Utilities.RunGitProcess("tag --sort=-creatordate");
+        string[] tags = [.. refs.Split('\n').Where(t => !string.IsNullOrWhiteSpace(t) && t.Contains('-') && Version.TryParse(t.Before('-'), out _)).Select(t => t.Trim()).OrderByDescending(t => Version.Parse(t.Before('-')))];
+        Version local = Version.Parse(Utilities.Version);
+        string[] newer = [.. tags.Where(t => Version.Parse(t.Before('-')) > local)];
+        if (newer.Any())
+        {
+            string url = $"{Utilities.RepoRoot}/releases/tag/{newer[0]}";
+            Logs.Warning($"A new version of SwarmUI is available: {newer[0]}! You are running version {Utilities.Version}, this is {newer.Length} release(s) behind. See release notes at {url}");
+            VersionUpdateMessage = $"Update available: {newer[0]} (you are running {Utilities.Version}, this is {newer.Length} release(s) behind):\nSee release notes at <a target=\"_blank\" href=\"{url}\">{url}</a>"
+                + "\nThere is a button available to automatically apply the update on the <a href=\"#Settings-Server\" onclick=\"getRequiredElementById('servertabbutton').click();getRequiredElementById('serverinfotabbutton').click();\">Server Info Tab</a>.";
+        }
+        else
+        {
+            Logs.Init($"Swarm is up to date! You have version {Utilities.Version}, and {tags[0]} is the latest.");
+        }
+    }
+
+    private static async Task CheckGitCommit()
+    {
+        try
+        {
+            string commitDate = await Utilities.RunGitProcess("show --no-patch --format=%ci HEAD");
+            DateTimeOffset date = DateTimeOffset.Parse(commitDate.Trim()).ToUniversalTime();
+            CurrentGitDate = $"{date:yyyy-MM-dd HH:mm:ss}";
+            Logs.Init($"Current git commit marked as date {CurrentGitDate}");
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"Failed to get git commit date: {ex}");
+            CurrentGitDate = "Git failed to load";
+        }
+    }
+
+    private static async Task CheckSystemInfo()
+    {
+        NvidiaUtil.NvidiaInfo[] gpuInfo = NvidiaUtil.QueryNvidia();
+        SystemStatusMonitor.HardwareInfo.RefreshMemoryStatus();
+        MemoryStatus memStatus = SystemStatusMonitor.HardwareInfo.MemoryStatus;
+        Logs.Init($"CPU Cores: {Environment.ProcessorCount} | RAM: {new MemoryNum((long)memStatus.TotalPhysical)} total, {new MemoryNum((long)memStatus.AvailablePhysical)} available");
+        if (gpuInfo is not null)
+        {
+            foreach (NvidiaUtil.NvidiaInfo gpu in gpuInfo)
+            {
+                Logs.Init($"GPU {gpu.ID}: {gpu.GPUName} | Temp {gpu.Temperature}C | Util {gpu.UtilizationGPU}% GPU, {gpu.UtilizationMemory}% Memory | VRAM {gpu.TotalMemory} total, {gpu.FreeMemory} free, {gpu.UsedMemory} used");
+            }
+        }
+    }
+
+    #endregion
 
     /// <summary>Build the main model list from settings. Called at init or on settings change.</summary>
     public static void BuildModelLists()
