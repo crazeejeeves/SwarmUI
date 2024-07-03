@@ -16,6 +16,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Runtime.Loader;
+using SwarmUI.Core.Systems;
 
 namespace SwarmUI.Core;
 
@@ -34,8 +35,8 @@ public class Program
     /// <summary>Main Stable-Diffusion model tracker.</summary>
     public static T2IModelHandler MainSDModels => T2IModelSets["Stable-Diffusion"];
 
-    /// <summary>All extensions currently loaded.</summary>
-    public static List<Extension> Extensions = [];
+    /// <summary> Extension lifecycle manager </summary>
+    public static IExtensionManager ExtensionManager = new ExtensionManager();
 
     /// <summary>Holder of server admin settings.</summary>
     public static Settings ServerSettings = new();
@@ -99,8 +100,10 @@ public class Program
             Logs.Debug($"Unhandled exception: {e.ExceptionObject}");
         };
         List<Task> waitFor = [];
-        //Utilities.CheckDotNet("8");
-        PrepExtensions();
+
+        ExtensionManager.AddExtensionPath("src/Extensions");
+        ExtensionManager.Setup();
+
         try
         {
             Logs.Init("Parsing command line...");
@@ -138,8 +141,9 @@ public class Program
         waitFor.Add(Utilities.RunCheckedTask(CheckSystemInfo));
 
         T2IModelClassSorter.Init();
-        RunOnAllExtensions(e => e.OnPreInit());
+        ExtensionManager.RunOnAll(e => e.OnPreInit());
         timer.Check("Extension PreInit");
+
         Logs.Init("Prepping options...");
         BuildModelLists();
         T2IParamTypes.RegisterDefaults();
@@ -148,22 +152,29 @@ public class Program
         Sessions = new();
         Web = new();
         timer.Check("Prep Objects");
+
         Web.PreInit();
         timer.Check("Web PreInit");
-        RunOnAllExtensions(e => e.OnInit());
+
+        ExtensionManager.RunOnAll(e => e.OnInit());
         timer.Check("Extensions Init");
+
         Utilities.PrepUtils();
         timer.Check("Prep Utils");
+
         LanguagesHelper.LoadAll();
         timer.Check("Languages load");
+
         Logs.Init("Loading models list...");
         RefreshAllModelSets();
         WildcardsHelper.Init();
         AutoCompleteListHelper.Init();
         timer.Check("Model listing");
+
         Logs.Init("Loading backends...");
         Backends.Load();
         timer.Check("Backends");
+
         Logs.Init("Prepping API...");
         BasicAPIFeatures.Register();
         foreach (string str in CommandLineFlags.Keys.Where(k => !CommandLineFlagsRead.Contains(k)))
@@ -171,15 +182,19 @@ public class Program
             Logs.Warning($"Unused command line flag '{str}'");
         }
         timer.Check("API");
+
         Logs.Init("Prepping webserver...");
         Web.Prep();
         timer.Check("Web prep");
+
         Logs.Init("Readying extensions for launch...");
-        RunOnAllExtensions(e => e.OnPreLaunch());
+        ExtensionManager.RunOnAll(e => e.OnPreLaunch());
         timer.Check("Extensions pre-launch");
+
         Logs.Init("Launching server...");
         Web.Launch();
         timer.Check("Web launch");
+
         try
         {
             Task.WaitAll([.. waitFor], Utilities.TimedCancel(TimeSpan.FromSeconds(5)));
@@ -359,9 +374,10 @@ public class Program
         {
             handler.Shutdown();
         }
+
         Logs.Verbose("Shutdown extensions...");
-        RunOnAllExtensions(e => e.OnShutdown());
-        Extensions.Clear();
+        ExtensionManager.Shutdown();
+
         Logs.Verbose("Shutdown image metadata tracker...");
         ImageMetadataTracker.Shutdown();
         Logs.Info("All core shutdowns complete.");
@@ -375,68 +391,6 @@ public class Program
         }
         Logs.Info("Process should end now.");
     }
-
-    #region extensions
-    /// <summary>Initial call that prepares the extensions list.</summary>
-    public static void PrepExtensions()
-    {
-        string[] builtins = Directory.EnumerateDirectories("./src/BuiltinExtensions").Select(s => s.Replace('\\', '/').AfterLast("/src/")).ToArray();
-        string[] extras = Directory.Exists("./src/Extensions") ? Directory.EnumerateDirectories("./src/Extensions/").Select(s => s.Replace('\\', '/').AfterLast("/src/")).ToArray() : [];
-        foreach (Type extType in AppDomain.CurrentDomain.GetAssemblies().ToList().SelectMany(x => x.GetTypes()).Where(t => typeof(Extension).IsAssignableFrom(t) && !t.IsAbstract))
-        {
-            try
-            {
-                Logs.Init($"Prepping extension: {extType.FullName}...");
-                Extension extension = Activator.CreateInstance(extType) as Extension;
-                extension.ExtensionName = extType.Name;
-                Extensions.Add(extension);
-                string[] possible = extType.Namespace.StartsWith("SwarmUI.") ? builtins : extras;
-                foreach (string path in possible)
-                {
-                    if (File.Exists($"src/{path}/{extType.Name}.cs"))
-                    {
-                        if (extension.FilePath is not null)
-                        {
-                            Logs.Error($"Multiple extensions with the same name {extType.Name}! Something will break.");
-                        }
-                        extension.FilePath = $"src/{path}/";
-                    }
-                }
-                if (extension.FilePath is null)
-                {
-                    Logs.Error($"Could not determine path for extension {extType.Name} - is the classname mismatched from the filename? Searched in {string.Join(", ", possible)} for '{extType.Name}.cs'");
-                }
-            }
-            catch (Exception ex)
-            {
-                Logs.Error($"Failed to create extension of type {extType.FullName}: {ex}");
-            }
-        }
-        RunOnAllExtensions(e => e.OnFirstInit());
-    }
-
-    /// <summary>Runs an action on all extensions.</summary>
-    public static void RunOnAllExtensions(Action<Extension> action)
-    {
-        foreach (Extension ext in Extensions)
-        {
-            try
-            {
-                action(ext);
-            }
-            catch (Exception ex)
-            {
-                Logs.Error($"Failed to run event on extension {ext.GetType().FullName}: {ex}");
-            }
-        }
-    }
-
-    /// <summary>Returns the extension instance of the given type.</summary>
-    public static T GetExtension<T>() where T : Extension
-    {
-        return Extensions.FirstOrDefault(e => e is T) as T;
-    }
-    #endregion
 
     #region settings
     /// <summary>Load the settings file.</summary>
